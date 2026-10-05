@@ -12,7 +12,7 @@
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="author" content="J. Petter">
 <title>U-Radar Hamburg</title>
-  <script>window.RADAR_API="https://u-radar.janbenjaminpetter.workers.dev"</script>
+<script>window.RADAR_API="https://u-radar.janbenjaminpetter.workers.dev"</script>
 <style>
 :root{--void:#0b0620;--cyan:#19f0ff;--mag:#ff2ea6;--amber:#ffb52e;--ink:#d9ccff}
 html,body{margin:0;height:100%;background:var(--void);color:var(--ink);overflow:hidden;
@@ -120,9 +120,94 @@ function relFrom(o,lat,lon){return {x:(lon-o.lon)*111320*Math.cos(o.lat*Math.PI/
 function focusSt(){return focusId?(stById.get(focusId)||pins.find(p=>p.id===focusId)||tmp):null;}
 function rel(lat,lon){return relFrom(focusSt()||pos,lat,lon);}
 function hash(s){let h=2166136261;for(const c of s){h^=c.charCodeAt(0);h=Math.imul(h,16777619);}return (h>>>0);}
-function angFor(sid,line,dirId){return (((hash(sid+'|'+line)%180)+(dirId==2?180:0))*Math.PI/180);}
+function angFor(sid,line,dirId){return (((hash(sid+'|'+line)%180)+(dirId==1?0:180))*Math.PI/180);}
 
 /* ---------- Daten ---------- */
+/* Echte Streckengeometrie auch für Live-Daten: Fahrtziel + Streckenfolge, abgesichert durch die Reihenfolge der Ankunftszeiten an Nachbarstationen */
+const idxOf=id=>/^S\d+$/.test(id)?+id.slice(1):-1;
+function uvIdx(a,b){const r=relFrom({lat:NET.st[a][1],lon:NET.st[a][2]},NET.st[b][1],NET.st[b][2]),l=Math.hypot(r.x,r.y)||1;return [r.x/l,r.y/l];}
+function dirsFor(i,line){
+  const out=[];
+  for(const r of NET.routes){ if(r.line!==line) continue; const j=r.p.indexOf(i); if(j<0) continue; out.push({r,sign:1,j},{r,sign:-1,j}); }
+  return out;
+}
+function stepIdx(o,k){
+  const N=o.r.p.length; let q=o.j+o.sign*k;
+  if(o.r.ring) q=((q%N)+N)%N; else if(q<0||q>=N) return null;
+  return o.r.p[q];
+}
+function costFor(o,D){
+  const d=nrm(D),N=o.r.p.length;
+  for(let k=1;k<=N;k++){const q=stepIdx(o,k); if(q==null) return Infinity; const nm=nrm(NET.st[q][0]); if(nm.length>=4&&d.includes(nm)) return k;}
+  return Infinity;
+}
+function resolveDirs(st){
+  const i=idxOf(st.id); if(i<0) return null;
+  const by={};
+  for(const d of st.deps){const g=(by[d.line]=by[d.line]||{});(g[d.dirId]=g[d.dirId]||new Set()).add(d.dir||'');}
+  const res={}, key=o=>NET.routes.indexOf(o.r)+':'+o.sign;
+  for(const line in by){
+    const cands=dirsFor(i,line); if(!cands.length) continue;
+    const gs=Object.keys(by[line]).map(id=>{
+      let best=null,bc=Infinity;
+      for(const o of cands) for(const D of by[line][id]){const c=costFor(o,D);if(c<bc){bc=c;best=o;}}
+      return {id,o:best,c:bc};
+    });
+    const used=new Set(), order=gs.slice().sort((a,b)=>a.c-b.c);
+    for(const g of order){
+      let o=g.o;
+      if(!o||used.has(key(o))){
+        const pv=order.find(x=>x.fin&&x!==g);
+        o=pv?cands.find(c=>c.r===pv.fin.r&&c.sign===-pv.fin.sign):cands[0];
+        if(!o||used.has(key(o))) o=cands.find(c=>!used.has(key(c)))||o;
+      }
+      g.fin=o; if(o) used.add(key(o));
+    }
+    res[line]={}; gs.forEach(g=>{res[line][g.id]=g.fin;});
+  }
+  return res;
+}
+function enrich(list){
+  const bySid={};
+  for(const s of list) for(const d of s.deps) (bySid[d.sid]=bySid[d.sid]||[]).push({s,d});
+  const unit=(a,b)=>{const r=relFrom(a,b.lat,b.lon),l=Math.hypot(r.x,r.y)||1;return [r.x/l,r.y/l];};
+  const votes={};
+  for(const s of list){
+    const res=s.deps.some(d=>!d.vin)?resolveDirs(s):null;
+    for(const d of s.deps){
+      if(d.vin) continue;
+      let vin=null,vout=null;
+      const f=res&&res[d.line]&&res[d.line][d.dirId];
+      if(f){
+        const i=idxOf(s.id),nx=stepIdx(f,1),pv=stepIdx({...f,sign:-f.sign},1);
+        if(nx!=null) vout=uvIdx(i,nx); if(pv!=null) vin=uvIdx(i,pv);
+        if(!vout&&vin) vout=[-vin[0],-vin[1]]; if(!vin&&vout) vin=[-vout[0],-vout[1]];
+      }
+      let vn=null,vp=null,bn=1e9,bp=-1e9;
+      for(const e of bySid[d.sid]){
+        if(e.s===s) continue;
+        if(e.d.min>d.min&&e.d.min<bn){bn=e.d.min;vn=unit(s,e.s);}
+        if(e.d.min<d.min&&e.d.min>bp){bp=e.d.min;vp=unit(s,e.s);}
+      }
+      d._vn=vn;d._vp=vp;
+      if(vin&&vout){
+        const k=s.id+'|'+d.line+'|'+d.dirId, v=votes[k]||(votes[k]={a:0,b:0});
+        if(vn){(vout[0]*vn[0]+vout[1]*vn[1]>0)?v.a++:v.b++;}
+        if(vp){(vin[0]*vp[0]+vin[1]*vp[1]>0)?v.a++:v.b++;}
+      }
+      d.vin=vin;d.vout=vout;
+    }
+  }
+  for(const s of list) for(const d of s.deps){
+    if(d._vn===undefined) continue;
+    const v=votes[s.id+'|'+d.line+'|'+d.dirId];
+    if(d.vin&&v&&v.b>v.a){const t=d.vin;d.vin=d.vout;d.vout=t;}
+    else if(!d.vin){
+      if(d._vn){d.vout=d._vn;d.vin=[-d._vn[0],-d._vn[1]];}
+      else if(d._vp){d.vin=d._vp;d.vout=[-d._vp[0],-d._vp[1]];}
+    }
+  }
+}
 function ingest(data){
   const t0=Date.now();
   stations=data.stations.map(s=>{
@@ -130,13 +215,14 @@ function ingest(data){
     let b=-1,bd=1e9;NET.st.forEach((e,i)=>{const dd=Math.hypot((e[2]-s.lon)*68000,(e[1]-s.lat)*110540);if(dd<bd){bd=dd;b=i;}});
     return bd<220?{...s,id:'S'+b,name:NET.st[b][0],lat:NET.st[b][1],lon:NET.st[b][2]}:s;
   });
+  enrich(stations);
   stById=new Map(stations.map(s=>[s.id,s]));
   const seen=new Set();
   for(const s of stations) for(const d of s.deps){
     const key=s.id+'|'+d.sid; seen.add(key);
     let sh=ships.get(key);
     const at=t0+d.min*60000;
-    if(!sh){sh={key,sid:s.id,line:d.line,ang:angFor(s.id,d.line,d.dirId),slipN:0,prog:t0,lastAt:at,lastT:t0,stall:false};ships.set(key,sh);}
+    if(!sh){sh={key,sid:s.id,tid:d.sid,line:d.line,ang:angFor(s.id,d.line,d.dirId),slipN:0,prog:t0,lastAt:at,lastT:t0,stall:false};ships.set(key,sh);}
     else{
       const el=t0-sh.lastT, da=at-sh.lastAt;
       if(el>=10000){
@@ -277,6 +363,10 @@ function drawYou(){
   poly([[-14,0],[0,-14],[14,0],[0,14]].map(([a,b])=>P(r.x+a,r.y+b)),true);ctx.stroke();ctx.setLineDash([]);
   const q=P(r.x,r.y);ctx.fillStyle='#ffb52e';ctx.font='10px "SF Mono",Menlo,monospace';ctx.fillText('DU',q[0]+8,q[1]+3);
 }
+function crossHit(x,y,w,h){
+  const L=Math.min(W*0.42,170),tp=6;
+  return (y<cy+tp&&y+h>cy-tp&&x<cx+L&&x+w>cx-L)||(x<cx+tp&&x+w>cx-tp&&y<cy+L*0.62&&y+h>cy-L*0.62);
+}
 function crosshair(){
   ctx.strokeStyle='rgba(25,240,255,.9)';ctx.lineWidth=1;ctx.shadowColor='#19f0ff';ctx.shadowBlur=6;
   const g=14,L=Math.min(W*0.42,170);
@@ -295,7 +385,9 @@ function drawStation(s,near){
   const b=P(s.x,s.y),t=P(s.x,s.y,30);poly([b,t],false);ctx.stroke();
   ctx.shadowBlur=0;ctx.fillStyle=c;ctx.font='10px "SF Mono",Menlo,monospace';
   const nm=s.name.length>17?s.name.slice(0,16)+'…':s.name;
-  if(zoom>=0.8||near) ctx.fillText(nm+' '+Math.round(s.du)+'m',t[0]+6,t[1]+3);
+  {const tt=nm+' '+Math.round(s.du)+'m',w=tt.length*6.1;let ty=t[1]+3;
+    if(crossHit(t[0]+6,ty-10,w,14)) ty-=22;
+    if((zoom>=0.8||near)&&!crossHit(t[0]+6,ty-10,w,14)) ctx.fillText(tt,t[0]+6,ty);}
   const m=P(s.x,s.y,15);s.sx=m[0];s.sy=m[1];
 }
 
@@ -336,16 +428,19 @@ function drawShip(sh,st,d,t){
   if(d>0&&!stall){ctx.strokeStyle=Math.random()<.5?'#ff2ea6':'#ffb52e';ctx.lineWidth=2;
     poly([W3(-38,0,z),W3(-38-40-Math.random()*50,0,z)],false);ctx.stroke();}
   // Beschriftung
-  ctx.shadowBlur=0;const lp=P(x,y,z);
+  ctx.shadowBlur=0;const lp=P(x,y,z),cw=6.7,tx=lp[0]+13;
   ctx.font='bold 11px "SF Mono",Menlo,monospace';ctx.fillStyle=c;
   if(zoom>=0.8){
-    ctx.fillText(sh.line+' ▸ '+short(sh.dir||'',16),lp[0]+13,lp[1]-14);
-    ctx.font='11px "SF Mono",Menlo,monospace';ctx.fillStyle=stall?'#ff2e4d':(d>0?'#ffffff':'#8f84b8');
-    ctx.fillText((stall?'steht '+stallTxt(sh,Date.now()):tlabel(d))+(!stall&&sh.delay>=60&&d>0?'  +'+Math.round(sh.delay/60)+' Verspät.':''),lp[0]+13,lp[1]-2);
-  } else if(stall){
-    ctx.fillText(sh.line+' steht',lp[0]+11,lp[1]-4);
-  } else if(d>0&&d<6){
-    ctx.fillText(sh.line+' '+(d>=1?Math.ceil(d)+'′':'<1′'),lp[0]+11,lp[1]-4);
+    const l1=sh.line+' ▸ '+short(sh.dir||'',16);
+    const l2=(stall?'steht '+stallTxt(sh,Date.now()):tlabel(d))+(!stall&&sh.delay>=60&&d>0?'  +'+Math.round(sh.delay/60)+' Verspät.':'');
+    if(!crossHit(tx,lp[1]-25,Math.max(l1.length,l2.length)*cw,28)){
+      ctx.fillText(l1,tx,lp[1]-14);
+      ctx.font='11px "SF Mono",Menlo,monospace';ctx.fillStyle=stall?'#ff2e4d':(d>0?'#ffffff':'#8f84b8');
+      ctx.fillText(l2,tx,lp[1]-2);
+    }
+  } else {
+    const t1=stall?sh.line+' steht':(d>0&&d<6?sh.line+' '+(d>=1?Math.ceil(d)+'′':'<1′'):'');
+    if(t1&&!crossHit(lp[0]+11,lp[1]-16,t1.length*cw,16)) ctx.fillText(t1,lp[0]+11,lp[1]-4);
   }
   ctx.globalAlpha=1;
 }
@@ -361,12 +456,18 @@ function frame(ts){
   for(const s of stations){const r=rel(s.lat,s.lon);s.x=r.x;s.y=r.y;const u=relFrom(pos,s.lat,s.lon);s.du=Math.hypot(u.x,u.y);}
   const shown=focusId?stations.filter(s=>s.id===focusId):stations;
   const nearest=focusId?null:stations.reduce((m,s)=>(!m||s.du<m.du)?s:m,null);
-  const items=[], lanes=new Set();
+  const items=[], lanes=new Set(), pick=new Map();
+  if(!focusId) for(const sh of ships.values()){
+    const st0=stById.get(sh.sid); if(!st0||st0.du===undefined) continue;
+    const sc0=(dOf(sh,now)>-0.3?0:1e6)+st0.du, cur=pick.get(sh.tid);
+    if(!cur||sc0<cur.sc) pick.set(sh.tid,{sc:sc0,key:sh.key});
+  }
   for(const [k,sh] of ships){
     const d=dOf(sh,now);
     if(d<-2.1){ships.delete(k);continue;}
     if(d>MAXMIN) continue;
     if(focusId&&sh.sid!==focusId) continue;
+    if(!focusId){const pk=pick.get(sh.tid); if(pk&&pk.key!==k) continue;}
     const st=stById.get(sh.sid); if(!st||st.x===undefined) continue;
     const vs=sh.vin?[sh.vin,sh.vout]:[[Math.cos(sh.ang),Math.sin(sh.ang)]];
     for(const v of vs){const lk=sh.sid+'|'+sh.line+'|'+v[0].toFixed(2)+','+v[1].toFixed(2);
