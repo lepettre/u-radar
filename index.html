@@ -18,10 +18,10 @@
 html,body{margin:0;height:100%;background:var(--void);color:var(--ink);overflow:hidden;
   font-family:"SF Mono",Menlo,"Courier New",monospace;-webkit-user-select:none;user-select:none;
   touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
-.scan{position:fixed;inset:0;pointer-events:none;mix-blend-mode:multiply;
+canvas{position:fixed;left:0;top:0;width:100%;height:100vh;height:100lvh;touch-action:none}
+.scan{position:fixed;left:0;top:0;width:100%;height:100vh;height:100lvh;pointer-events:none;mix-blend-mode:multiply;
   background:repeating-linear-gradient(0deg,rgba(0,0,0,.30) 0 1px,transparent 1px 3px)}
-.vig{position:fixed;inset:0;pointer-events:none;
+.vig{position:fixed;left:0;top:0;width:100%;height:100vh;height:100lvh;pointer-events:none;
   background:radial-gradient(ellipse at 50% 47%,transparent 50%,rgba(5,0,20,.9) 100%)}
 .hud{position:fixed;left:0;right:0;box-sizing:border-box;padding:0 14px;pointer-events:none;
   font-size:11px;letter-spacing:.05em}
@@ -51,7 +51,9 @@ canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
 @keyframes bl{50%{opacity:.2}}
 .row.stall .t{animation:bl 1s steps(2,start) infinite}
 @media (prefers-reduced-motion:reduce){.row.stall .t{animation:none}}
-#bot{bottom:calc(env(safe-area-inset-bottom,0px) + 12px)}
+#bot{top:0;height:100vh;height:100lvh;display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:calc(env(safe-area-inset-bottom,0px) + 10px)}
+#rows{overflow-y:auto;max-height:30vh;max-height:30lvh;pointer-events:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+#rows::-webkit-scrollbar{display:none}
 .row{display:flex;justify-content:space-between;gap:10px;margin-top:4px;padding:5px 8px;
   background:rgba(11,6,32,.62);border-left:3px solid var(--c);}
 .row b{color:var(--c);text-shadow:0 0 6px var(--c);margin-right:8px}
@@ -104,8 +106,9 @@ const C=Math.SQRT1_2, TAU=Math.PI*2;
 
 function resize(){
   const d=Math.min(devicePixelRatio||1,2);
-  W=innerWidth;H=innerHeight;cv.width=W*d;cv.height=H*d;ctx.setTransform(d,0,0,d,0,0);
-  K0=W*0.47/RANGE;cx=W/2;cy=H*0.47;K=K0*zoom;
+  W=innerWidth;H=Math.max(innerHeight,(navigator.standalone&&innerWidth<innerHeight)?screen.height:0);
+  cv.width=W*d;cv.height=H*d;cv.style.height=H+'px';ctx.setTransform(d,0,0,d,0,0);
+  K0=W*0.47/RANGE;cx=W/2;cy=H*0.45;K=K0*zoom;
 }
 addEventListener('resize',resize);resize();
 
@@ -309,6 +312,21 @@ function tlabel(d){
   if(d>0) return 'T-'+Math.max(1,Math.ceil(d*60))+' s';
   return 'abgefahren';
 }
+function visible(now){
+  const out=[],best=new Map();
+  if(!focusId) for(const sh of ships.values()){
+    const st=stById.get(sh.sid); if(!st||st.du===undefined) continue;
+    const sc=(dOf(sh,now)>-0.3?0:1e6)+st.du,cur=best.get(sh.tid);
+    if(!cur||sc<cur.sc) best.set(sh.tid,{sc,key:sh.key});
+  }
+  for(const sh of ships.values()){
+    const st=stById.get(sh.sid); if(!st) continue;
+    if(focusId?sh.sid!==focusId:(best.get(sh.tid)||{}).key!==sh.key) continue;
+    const d=dOf(sh,now); if(d<=-1.0||d>MAXMIN) continue;
+    out.push({sh,st,d});
+  }
+  return out;
+}
 const dOf=(sh,now)=>sh.stall?sh.hold:(sh.at-now)/60000;
 const stallTxt=(sh,now)=>{const q=Math.max(0,Math.round((now-sh.stallFrom)/1000));return Math.floor(q/60)+':'+String(q%60).padStart(2,'0');};
 const short=(s,n)=>s.length>n?s.slice(0,n-1)+'…':s;
@@ -399,7 +417,7 @@ function shipPos(sh,st,d){
 }
 function drawShip(sh,st,d,t){
   const stall=!!sh.stall, c=(stall&&Math.sin(t*8)>0)?'#ff2e4d':col(sh.line), q=shipPos(sh,st,d), x=q.x, y=q.y, h=q.h, p=[-h[1],h[0]];
-  let a=1; if(d>MAXMIN-1) a=Math.max(0,MAXMIN-d); if(d<-1.2) a=Math.max(0,1-(-1.2-d)/0.8); if(sh.end&&d<0) a=Math.max(0,1+d/0.35);
+  let a=1; if(d>MAXMIN-1) a=Math.max(0,MAXMIN-d); if(d<-0.5) a=Math.max(0,1-(-0.5-d)/0.5); if(sh.end&&d<0) a=Math.max(0,1+d/0.35);
   const z=16+(reduce?0:Math.sin(t*2.2+sh.ang*3)*2);
   const sc=sMul(),W3=(f,l,zz)=>P(x+(h[0]*f+p[0]*l)*sc,y+(h[1]*f+p[1]*l)*sc,zz);
   const shape=[[110,0],[-60,60],[-35,0],[-60,-60]];
@@ -456,19 +474,10 @@ function frame(ts){
   for(const s of stations){const r=rel(s.lat,s.lon);s.x=r.x;s.y=r.y;const u=relFrom(pos,s.lat,s.lon);s.du=Math.hypot(u.x,u.y);}
   const shown=focusId?stations.filter(s=>s.id===focusId):stations;
   const nearest=focusId?null:stations.reduce((m,s)=>(!m||s.du<m.du)?s:m,null);
-  const items=[], lanes=new Set(), pick=new Map();
-  if(!focusId) for(const sh of ships.values()){
-    const st0=stById.get(sh.sid); if(!st0||st0.du===undefined) continue;
-    const sc0=(dOf(sh,now)>-0.3?0:1e6)+st0.du, cur=pick.get(sh.tid);
-    if(!cur||sc0<cur.sc) pick.set(sh.tid,{sc:sc0,key:sh.key});
-  }
-  for(const [k,sh] of ships){
-    const d=dOf(sh,now);
-    if(d<-2.1){ships.delete(k);continue;}
-    if(d>MAXMIN) continue;
-    if(focusId&&sh.sid!==focusId) continue;
-    if(!focusId){const pk=pick.get(sh.tid); if(pk&&pk.key!==k) continue;}
-    const st=stById.get(sh.sid); if(!st||st.x===undefined) continue;
+  for(const [k,sh] of ships) if(dOf(sh,now)<-1.1) ships.delete(k);
+  const items=[], lanes=new Set();
+  for(const {sh,st,d} of visible(now)){
+    if(st.x===undefined) continue;
     const vs=sh.vin?[sh.vin,sh.vout]:[[Math.cos(sh.ang),Math.sin(sh.ang)]];
     for(const v of vs){const lk=sh.sid+'|'+sh.line+'|'+v[0].toFixed(2)+','+v[1].toFixed(2);
       if(lanes.has(lk)) continue; lanes.add(lk);
@@ -496,14 +505,12 @@ function hud(){
   st.classList.toggle('bad',failed||(!pos.real&&!!locErr));
   if(failed) txt='SIGNAL VERLOREN · '+age+'s';
   st.textContent=txt;
-  const now=Date.now(),list=[];
-  for(const sh of ships.values()){if(focusId&&sh.sid!==focusId)continue;const d=dOf(sh,now);if(d>-0.2&&d<=MAXMIN)list.push([d,sh]);}
-  list.sort((a,b)=>a[0]-b[0]);
-  $('#rows').innerHTML=list.slice(0,focusId?6:4).map(([d,sh])=>{
-    const s=stById.get(sh.sid);
+  const now=Date.now(),list=visible(now).sort((x,y)=>x.d-y.d),rows=$('#rows'),sc=rows.scrollTop;
+  rows.innerHTML=list.map(({sh,st:s,d})=>{
     return `<div class="row${sh.stall?' stall':''}" style="--c:${sh.stall?'#ff2e4d':col(sh.line)}"><div class="n"><b>${esc(sh.line)}</b>▸ ${esc(sh.dir||'')} <i>ab ${esc(s?s.name:'')}</i></div>`+
       `<div class="t">${sh.stall?'steht '+stallTxt(sh,now):tlabel(d)}${!sh.stall&&sh.delay>=60?' <u>+'+Math.round(sh.delay/60)+'</u>':''}</div></div>`;
   }).join('');
+  rows.scrollTop=sc;
 }
 
 /* Kompass */
@@ -562,7 +569,7 @@ function renderChips(){
   mk('Alle',!focusId,()=>setFocus(null));
   const list=pins.slice(); if(focusId&&!isPinned(focusId)&&tmp) list.push(tmp);
   for(const p of list){
-    const on=focusId===p.id, b=mk(p.name.length>16?p.name.slice(0,15)+'…':p.name,on,()=>setFocus(p.id,p));
+    const on=focusId===p.id, nm=p.name.length>16?p.name.slice(0,15)+'…':p.name, b=mk((isPinned(p.id)&&!on?'★ ':'')+nm,on,()=>setFocus(p.id,p));
     if(on){const s=document.createElement('span');s.className='pin';s.textContent=isPinned(p.id)?'★':'☆';
       s.onclick=ev=>{ev.stopPropagation();togglePin(p);};b.appendChild(s);}
   }
